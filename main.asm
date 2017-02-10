@@ -1,6 +1,11 @@
+/*
+* We certainly need to unprogramm CKDIV8 bit, in fuse Low Byte, to run MCU at 8 MHZ (we will it then prescaller as needed)
+*/
+
 #define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
 #define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
 //#define FREQ_GEN	; procedure to beep on different freq via 1 wire uart protocol 
+
 
 #ifdef INVERTED_INPUT
  .MACRO SKIP_IF_INPUT_OFF
@@ -57,16 +62,20 @@ COMP_VAL_RAM_H:	.BYTE 1 ; storage for freq value of buzzer. Can be changed in co
 
 .CSEG
 		rjmp RESET 	; Reset Handler
-		reti		;rjmp INT0 	; IRQ0 Handler
-		reti            ; just wake up... rjmp PC_int	; PCINT0 Handler
-		reti		;rjmp TCAP_int; Timer0 Capture Handler
-		set			; Timer0 Overflow Handler try T flag first
-		set			; Timer0 Compare A Handler (save time for rcall). exits by next reti command
-		reti		; Timer0 Compare B Handler
+		reti		; External Interrupt Request 0
+		reti            ; just wake up... ; PCINT0 Handler
+		reti		; Timer/Counter1 Compare Match A
+		reti 		; Timer/Counter1 Overflow
+		set		; Timer0 Overflow Handler try T flag first
+		reti		; EEPROM Ready
 		reti		; Analog Comparator Handler
-		reti		;rjmp WDT_int; Watchdog Interrupt Handler
-		reti		; Voltage Level Monitor Handler
-		reti		;rjmp ADC_int; ADC Conversion Handler
+		reti		; ADC Conversion Handler
+		reti		; Timer/Counter1 Compare Match B
+		set		; Timer0 Compare A Handler (save time for rcall). exits by next reti command
+		reti		; Timer0 Compare B Handler
+		reti		; Watchdog Interrupt Handler
+		reti		; USI START
+		reti		; USI Overflow
 
 RST_PRESSED: ; we come here when reset button is pressed
 		; logic will be:
@@ -202,8 +211,12 @@ RST_BUZZ_OFF:
 RESET: 	
 		cli
 		; determine why we are here (by power-on or by reset pin goes to low)
-		in tmp1, RSTFLR	; tmp1 should not be changed til sbrc tmp1, EXTRF
+		in tmp1, MCUSR	; tmp1 should not be changed til sbrc tmp1, EXTRF
+		clr z0				; general 0 value register
+		; reset RESET flag
+		out MCUSR, z0
 		
+		; Initialize Stack pointer
 		ldi tmp, high (RAMEND) ; Main program start
 		out SPH,tmp ; Set Stack Pointer
 		ldi tmp, low (RAMEND) ; to top of RAM
@@ -212,7 +225,6 @@ RESET:
 		rcall MAIN_CLOCK_250KHZ	; set main clock to 250KHZ...
 		
 		; initialize variables
-		clr z0				; general 0 value register
 		ldi pwm_volume, DEFAULT_VOUME	; Volume of buzzer 1-20
 		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
@@ -478,19 +490,21 @@ TIMER_DISABLE:
 		ret
 
 MAIN_CLOCK_4MHZ:
+		; We assume that CKDIV8 is unprogrammed (device shipped with CKDIV8 programmed)
 		; 4Mhz (Leave 8 mhz osc with prescaler 2)
 		; Write signature for change enable of protected I/O register
-		ldi tmp, 0xD8
-		out CCP, tmp
-		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4mhz)
-		out  CLKPSR, tmp
+		ldi tmp, (1 << CLKPCE)
+		out CLKPR, tmp
+		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4Mhz)
+		out  CLKPR, tmp
 		ret
 
 MAIN_CLOCK_250KHZ:
-		; 250khz (Leave 8 mhz osc with prescaler 32)
+		; We assume that CKDIV8 is unprogrammed (device shipped with CKDIV8 programmed)
+		; 250Khz (Leave 8 mhz osc with prescaler 32)
 		; Write signature for change enable of protected I/O register
-		ldi tmp, 0xD8
-		out CCP, tmp
-		ldi tmp, (0 << CLKPS3) | (1 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 32 (250khz)
-		out  CLKPSR, tmp
+		ldi tmp, (1 << CLKPCE)
+		out CLKPR, tmp
+		ldi tmp, (0 << CLKPS3) | (1 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 32 (250Khz)
+		out  CLKPR, tmp
 		ret
