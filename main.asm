@@ -1,25 +1,7 @@
 #define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
 #define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
+//#define FREQ_GEN	; procedure to beep on different freq via 1 wire uart protocol 
 
-/*
- * Author: nppc
- * Hardware design: nppc
- * Contributor to the hardware design: universam
- * 
- * This file is the main routine for the Lost Alarm Buzzer module
- *
- * Lost Alarm Buzzer is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Lost Alarm Buzzer software is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- */
- 
 #ifdef INVERTED_INPUT
  .MACRO SKIP_IF_INPUT_OFF
 	sbis PINB, BUZZ_Inp
@@ -107,7 +89,7 @@ RST_PRESSED: ; we come here when reset button is pressed
 		; loop if pressed too much times
 		cpi tmp, 3			; 3 is non existing mode
 		brne SKP_OPT_LOOP
-		ldi tmp, 1			; gp back to option 1
+		ldi tmp, 1			; go back to option 1
 SKP_OPT_LOOP:
 		sts RST_OPTION, tmp
 		; beep n times according to RST_OPTION
@@ -139,6 +121,7 @@ L1_RST_WAIT:
 		; TODO 1wire protocol
 		; configure timer0 for capturing 1w data
 		; TCCR0A, TCCR0B and TCCR0C is already configured
+#ifdef FREQ_GEN
 W1_L0:	rcall MAIN_CLOCK_4MHZ	; for simplicity lets run this routines allways on 4mhz
 		rcall TIMER_ENABLE	; enable timer0 and reset timer counter
 		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (0 << WGM02) | (1 << CS00) ; configure ICP mode
@@ -210,6 +193,7 @@ W1_CONT:ror W1_DATA_H	; shift right one bit with C
 		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP_ON	; skip mute check
 		rjmp W1_L0		; back to listen for 1Wire protocol
+#endif
 RST_BUZZ_OFF:
 		ldi mute_buzz, 1
 		rjmp PRG_CONT	; back to main program
