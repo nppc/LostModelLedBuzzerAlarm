@@ -73,10 +73,18 @@ COMP_VAL_RAM_H:	.BYTE 1 ; storage for freq value of buzzer. Can be changed in co
 		reti		; Timer/Counter1 Compare Match B
 		set		; Timer0 Compare A Handler (save time for rcall). exits by next reti command
 		reti		; Timer0 Compare B Handler
-		reti		; Watchdog Interrupt Handler
+		rjmp WDT_INT	; Watchdog Interrupt Handler
 		reti		; USI START
 		reti		; USI Overflow
 
+WDT_INT:
+	in itmp_sreg, SREG
+	in tmp, WDTCR
+	sbr tmp, (1 << WDIE)
+	out WDTCR, tmp
+	out SREG, itmp_sreg
+	reti
+	
 RST_PRESSED: ; we come here when reset button is pressed
 		; logic will be:
 		; very first action - is just wait for 100ms for example, to eliminate noise on reset button
