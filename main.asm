@@ -5,6 +5,7 @@
 #define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
 #define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
 //#define FREQ_GEN	; procedure to beep on different freq via 1 wire uart protocol 
+//#define DEBUG ; skip one minute delay after power loss
 
 
 #ifdef INVERTED_INPUT
@@ -27,7 +28,8 @@
 .EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
 .EQU	V_Inp		= PB0	; Input for supply voltage sensing
 
-.EQU	TMR_COMP_VAL 	= 595	; about 3.1 khz (50% duty cycle) at 4mhz clock source
+; 595 - 3.1khz
+.EQU	TMR_COMP_VAL 	= 870	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 .EQU	PWM_FAST_DUTY	= 20		; Fast PWM (Volume) duty cycle len
 .EQU	DEFAULT_VOUME	= 20		; Buzzer volume (1-20)
 
@@ -308,6 +310,9 @@ GO_BEACON:      ; right after power loss we wait a minute, and then beep
 		#endif
 
 		ldi tmp, 8 ; about 1 minute
+#ifdef DEBUG
+		ldi tmp, 1 
+#endif			
 BEAC_WT1:	
 		push tmp
 		rcall WDT_On_8s
