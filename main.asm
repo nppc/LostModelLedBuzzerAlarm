@@ -24,9 +24,12 @@
 .ENDMACRO
 #endif
  
-.EQU	BUZZ_Out	= PB2	; PWM buzzer output 
-.EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
-.EQU	V_Inp		= PB0	; Input for supply voltage sensing
+.EQU	BUZZ_Out	= PB4	; PWM buzzer output 
+.EQU	BUZZ_Inp	= PB0	; BUZZER Input from FC 
+.EQU	BLED_Out	= PB3	; BEACON LED output 
+.EQU	V_Inp		= PB2	; Input for supply voltage sensing
+.EQU	LEDS_Out	= PB1	; LEDS output 
+
 
 ; 595 - 3.1khz
 .EQU	TMR_COMP_VAL 	= 870	; about 3.1 khz (50% duty cycle) at 4mhz clock source
@@ -244,37 +247,39 @@ RESET:
 		STS COMP_VAL_RAM_H, tmp
 
 		; configure pins
-		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
+		ldi tmp, 	(1<<BUZZ_Out) | (1<<LEDS_Out) | (1<<BLED_Out)	; set pins as output
 		out DDRB,	tmp				; all other pins will be inputs		
 		; If input is not inverted we need external pull-down resistor about 50K
-		#ifdef INVERTED_INPUT
-		ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
-		out PUEB,	tmp				; 
-		out PORTB, tmp				; all pins to LOW except pull-up
-		#endif
+		;#ifdef INVERTED_INPUT
+		;ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
+		;out PUEB,	tmp				; 
+		;out PORTB, tmp				; all pins to LOW except pull-up
+		;#endif
 		
-		#ifndef _TN9DEF_INC_
+		out PORTB, z0				; all pins to LOW
+		
 		; Disable ADC
-		in tmp, PRR
-		sbr tmp, (1 << PRADC) ; set bit to disable ADC
+		out ADCSRA, z0
+		
+		; Disable some other pereperials clock (Timer1, USI, ADC)
+		ldi tmp, (1<<PRTIM1) | (1<<PRUSI) | (1<<PRADC)
 		out PRR, tmp
-		#endif
 
-		out TCCR0A, z0
 		rcall TIMER_DISABLE ; disable timer0 for now
 
 		; disable analog comparator
 		ldi	tmp, (1 << ACD)	; analog comp. disable
 		out ACSR, tmp			; disable power to analog comp.
 
-		; Configure Pin Change interrupt for BUZZER input
-		ldi tmp, 	(1 << BUZZ_Inp)
-		out PCMSK, 	tmp	; configure pin for ext interrupt
-		sbi PCICR, PCIE0	; pin change interrupt enable
+		; Configure Pin Change interrupt for BUZZER controll input
+		ldi tmp, (1 << BUZZ_Inp)
+		out PCMSK, tmp	; configure pin for ext interrupt
+		ldi tmp, (1 << PCIE)
+		out GIMSK, tmp	; pin change interrupt enable
 						
 		sei ; Enable interrupts
 
-		out RSTFLR, z0	; reset all reset flags 
+		;out MCUSR, z0	; reset all reset flags 
 
 		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
 		rjmp RST_PRESSED
@@ -311,7 +316,7 @@ GO_BEACON:      ; right after power loss we wait a minute, and then beep
 
 		ldi tmp, 8 ; about 1 minute
 #ifdef DEBUG
-		ldi tmp, 1 
+		ldi tmp, 1 ; about 8 seconds for debugging
 #endif			
 BEAC_WT1:	
 		push tmp
@@ -374,21 +379,20 @@ WDT_On_250ms:
 ;		rjmp WDT_On
 WDT_On_8s:
 		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (1 << WDP3) | (0 << WDP2) | (0 << WDP1) | (1 << WDP0) ; 8 sec, interrupt enable
-WDT_On:	wdr					; reset the WDT
-		; Clear WDRF in RSTFLR
-		in tmp, RSTFLR
-		andi tmp, ~(1<<WDRF)
-		out RSTFLR, tmp		; Write signature for change enable of protected I/O register
-		ldi tmp, 0xD8
-		out CCP, tmp
-		out  WDTCSR, tmp1	; preset register
+WDT_On:	wdr	; reset the WDT
+		; first, enable writing to the WD control register
+		in tmp, WDTCR
+		ori tmp, (1<<WDCE) | (1<<WDE)
+		out WDTCR, tmp
+		; Now we can write new configuration and reset watchdog
+		out WDTCR, tmp1	; tmp1 previously set
 		wdr
 		ret	; End WDT_On
 		
 
 GO_sleep:
 		; Configure Sleep Mode
-		ldi tmp, (1<<SE) | (0<<SM2) | (1<<SM1) | (0<<SM0)	; enable power down sleep mode
+		ldi tmp, (1<<SE) | (1<<SM1) | (0<<SM0)	; enable power down sleep mode
 		out SMCR, tmp
 		SLEEP
 		; stops here until wake-up event occurs
@@ -486,9 +490,14 @@ TIMER_ENABLE:
 		in tmp, PRR
 		cbr tmp, (1 << PRTIM0) ; clear bit
 		out PRR, tmp
-		; configure timer 0 to work in CTC mode (4), no prescaler
-		ldi tmp, (0 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
+		; configure timer 0 to work in CTC mode, no prescaler
+		ldi tmp, (1<<WGM01)
+		out TCCR0A, tmp
+		ldi tmp, (0 << ICNC0) | (0 << ICES0) | (1 << CS00) ; also preconfigure ICP mode
 		out TCCR0B, tmp
+		; initialize interrupts
+		ldi tmp, (1<<OCIE0A) | (1<<TOIE0)
+		out TIMSK, tmp
 		; reset timer
 		out TCNT0H, z0
 		out TCNT0L, z0
@@ -496,7 +505,10 @@ TIMER_ENABLE:
 
 TIMER_DISABLE:
 		; disable the timer
+		out TIMSK, z0
+		out TCCR0A, z0	; stop timer before turning it off
 		out TCCR0B, z0	; stop timer before turning it off
+		; stop clock to timer0 module
 		in tmp, PRR
 		sbr tmp, (1 << PRTIM0) ; set bit
 		out PRR, tmp
