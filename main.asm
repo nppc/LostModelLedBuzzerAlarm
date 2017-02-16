@@ -158,7 +158,6 @@ RESET:
 		rcall MAIN_CLOCK_250KHZ	; set main clock to 250KHZ...
 		
 		; initialize variables
-		ldi pwm_volume, DEFAULT_VOUME	; Volume of buzzer 1-20
 		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
 		ldi tmp,TMR_COMP_VAL
