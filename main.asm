@@ -1,8 +1,8 @@
 /*
-* We certainly need to unprogramm CKDIV8 bit, in fuse Low Byte, to run MCU at 8 MHZ (we will it then prescaller as needed)
+* We run MCU at default 1Mhz (8mhz and DIV8)
 */
 
-#define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
+//#define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
 #define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
 //#define FREQ_GEN	; procedure to beep on different freq via 1 wire uart protocol 
 //#define DEBUG ; skip one minute delay after power loss
@@ -58,7 +58,7 @@
 ; r30 has the flag (no sound)
 
 .DSEG
-.ORG 0x0040	; start of SRAM data memory
+;.ORG 0x0040	; start of SRAM data memory
 RST_OPTION: 	.BYTE 1	; store here count of reset presses after power-on to determine special modes of operation
 COMP_VAL_RAM:	.BYTE 1	; storage for freq value of buzzer.
 
@@ -311,7 +311,7 @@ WDT_On:	wdr	; reset the WDT
 GO_sleep:
 		; Configure Sleep Mode
 		ldi tmp, (1<<SE) | (1<<SM1) | (0<<SM0)	; enable power down sleep mode
-		out SMCR, tmp
+		out MCUCR, tmp
 		SLEEP
 		; stops here until wake-up event occurs
 		ret
