@@ -5,7 +5,7 @@
 //#define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
 #define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
 //#define FREQ_GEN	; procedure to beep on different freq via 1 wire uart protocol 
-//#define DEBUG ; skip one minute delay after power loss
+#define DEBUG ; skip one minute delay after power loss
 
 
 #ifdef INVERTED_INPUT
@@ -41,12 +41,14 @@
 .undef ZL
 .undef ZH
 ; r0-r15 is not available in this tiny mcu series.
+.def	z0			= r0	; zero reg
+.def	itmp		= r21	; for using in interrupts
+.def	itmp_sreg	= r15	; storage for SREG in interrupts
 .def	tmp			= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
 .def	buz_on_cntr	= r18	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
 .def	pwm_volume	= r19	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
 .def	pwm_counter	= r20	; just a counter for fast PWM duty cycle
-.def	itmp_sreg	= r21	; storage for SREG in interrupts
 .def	W1_DATA_L	= r22	; L data register for data, received by 1Wire protocol
 .def	W1_DATA_H	= r23	; H data register for data, received by 1Wire protocol
 .def	icp_d		= r24	; delay from ICP routine (len of the signal)
@@ -54,7 +56,6 @@
 #ifdef PROGRESSIVE_DELAY
 .def	beeps_cntr	= r30	; Used in PROGRESSIVE_DELAY mode to count beeps
 #endif
-.def	z0			= r31	; zero reg
 ; r30 has the flag (no sound)
 
 .DSEG
@@ -68,12 +69,12 @@ COMP_VAL_RAM:	.BYTE 1	; storage for freq value of buzzer.
 		reti            ; just wake up... ; PCINT0 Handler
 		reti		; Timer/Counter1 Compare Match A
 		reti 		; Timer/Counter1 Overflow
-		set		; Timer0 Overflow Handler try T flag first
+		reti		; Timer0 Overflow Handler try T flag first
 		reti		; EEPROM Ready
 		reti		; Analog Comparator Handler
 		reti		; ADC Conversion Handler
 		reti		; Timer/Counter1 Compare Match B
-		set		; Timer0 Compare A Handler (save time for rcall). exits by next reti command
+		reti		; Timer0 Compare A Handler (save time for rcall). exits by next reti command
 		reti		; Timer0 Compare B Handler
 		rjmp WDT_INT	; Watchdog Interrupt Handler
 		reti		; USI START
@@ -81,9 +82,9 @@ COMP_VAL_RAM:	.BYTE 1	; storage for freq value of buzzer.
 
 WDT_INT:
 	in itmp_sreg, SREG
-	in tmp, WDTCR
-	sbr tmp, (1 << WDIE)
-	out WDTCR, tmp
+	in itmp, WDTCR
+	sbr itmp, (1 << WDIE)
+	out WDTCR, itmp
 	out SREG, itmp_sreg
 	reti
 	
@@ -106,7 +107,7 @@ RST_PRESSED: ; we come here when reset button is pressed
 		lds tmp, RST_OPTION
 		inc tmp
 		; loop if pressed too much times
-		cpi tmp, 3			; 3 is non existing mode
+		cpi tmp, 5			; 5 is non existing mode
 		brne SKP_OPT_LOOP
 		ldi tmp, 1			; go back to option 1
 SKP_OPT_LOOP:
@@ -132,12 +133,15 @@ L1_RST_WAIT:
 		; now decide to what mode to go
 		; do we just turn off buzzer?
 		lds tmp, RST_OPTION
-		cpi tmp, 1
-		breq RST_BUZZ_OFF
+		;cpi tmp, 1
+		;breq RST_BUZZ_OFF
 
 
 RST_BUZZ_OFF:
 		ldi mute_buzz, 1
+		; indicate exit from RST mode
+		ldi buz_on_cntr, 20 ; very short beep
+		rcall BEEP_ON		; ignore mute flag
 		rjmp PRG_CONT	; back to main program
 
 ; start of the program
@@ -198,6 +202,7 @@ RESET:
 
 		;out MCUSR, z0	; reset all reset flags 
 
+		;*** DISABLE RST FUNCTION FOR NOW *****
 		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
 		rjmp RST_PRESSED
 
@@ -216,6 +221,7 @@ MAIN_loop:
 		; check input pin for state
 		clr buz_on_cntr ; if pin on, we are ready
 		SKIP_IF_INPUT_OFF	; macro for sbis or sbic command
+		;rcall SHORT_BLINK_BEACON
 		rcall BEEP  ; beep until pin change come
 		; go sleep, it will speed up supercap charging a bit...
 		rcall WDT_On_8s
@@ -224,7 +230,7 @@ MAIN_loop:
 		rjmp MAIN_loop
 
 GO_BEACON:      ; right after power loss we wait a minute, and then beep
-		ldi buz_on_cntr, 40 ; load 255 to the buzzer counter (about 84ms)
+		ldi buz_on_cntr, 20 ; very short beep
 		rcall BEEP_ON
 
 		#ifdef PROGRESSIVE_DELAY
@@ -345,13 +351,15 @@ BEEP_ON:; call from here if we want to skip beep mute check...
 		rcall TIMER_ENABLE	; reset timer counter
 		; load Compare register to get desired tone freq
 		lds tmp, COMP_VAL_RAM
+		;ldi tmp, 250
 		out OCR1C,tmp
 
 PWM_loop:
 		; just some delay... Later we can use some sort of sleep here
-		ldi tmp, 255
+		ldi tmp, 128
+small_pause:
 		dec tmp
-		brne PWM_loop
+		brne small_pause
 		
 		cpi buz_on_cntr, 0
 		breq chck_pcint		; go to routine to check, does PC_int (pin change interrupt) occurs?
@@ -366,9 +374,9 @@ chck_pcint:	SKIP_IF_INPUT_ON	; macro for sbis or sbic command
 		rjmp PWM_loop
 ; here we finish our routine for buzzer.
 PWM_loop_exit:
-		rcall MAIN_CLOCK_250KHZ
 		; disable the timer
 		rcall TIMER_DISABLE
+		rcall MAIN_CLOCK_250KHZ
 ; ***** END OF MANUAL PWM ROUTINE ******
 PWM_exit:
 		ret
@@ -379,23 +387,22 @@ TIMER_ENABLE:
 		cbr tmp, (1 << PRTIM1) ; clear bit
 		out PRR, tmp
 		; configure timer 1 to work in normal mode, no prescaler
-		ldi tmp, (1<<CTC1) | (1<<CS10) ; no prescaller
+		ldi tmp, (1<<CTC1) | (0<<CS11) | (1<<CS10) ; no prescaller
 		out TCCR1, tmp
-		ldi tmp, (1 << COM1B0) ; toggle PB4 pin
-		out GTCCR, tmp
-		ldi tmp, 1	; set OCR1B to some value (that is allways smaller than OCR1C)
-		out OCR1B, tmp
-		ldi tmp, 255
-		out OCR1C, tmp ; set max top value just for initialization. Beep routine will set it to correct one.
-		; initialize interrupts - no interrupts at the moment
-		;ldi tmp, (1<<OCIE0A) | (1<<TOIE0)
-		;out TIMSK, tmp
+		out TIMSK, z0
 		; reset timer
 		out TCNT1, z0
+		ldi tmp, (1 << COM1B0) ; toggle PB4 pin
+		out GTCCR, tmp
+		ldi tmp, 5	; set OCR1B to some value (that is allways smaller than OCR1C)
+		out OCR1B, tmp
+		;ldi tmp, 255
+		out OCR1C, z0 ; set max top value just for initialization. Beep routine will set it to correct one.
 		ret
 
 TIMER_DISABLE:
 		; disable the timer
+		out TIMSK, z0
 		out TCCR1, z0
 		out GTCCR, z0	; stop timer before turning it off
 		; stop clock to timer0 module
@@ -409,7 +416,7 @@ MAIN_CLOCK_1MHZ:
 		; Write signature for change enable of protected I/O register
 		ldi tmp, (1 << CLKPCE)
 		out CLKPR, tmp
-		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (0 << CLKPS0) ;  prescaler is 1 (1Mhz)
+		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (1 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 8 (1Mhz)
 		out  CLKPR, tmp
 		ret
 
@@ -418,6 +425,12 @@ MAIN_CLOCK_250KHZ:
 		; Write signature for change enable of protected I/O register
 		ldi tmp, (1 << CLKPCE)
 		out CLKPR, tmp
-		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (1 << CLKPS1) | (0 << CLKPS0) ;  prescaler is 4 (250Khz)
+		ldi tmp, (0 << CLKPS3) | (1 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 32 (250Khz)
 		out  CLKPR, tmp
+		ret
+
+SHORT_BLINK_BEACON:
+		sbi		PORTB, BLED_Out
+		rcall	WAIT100MS
+		cbi		PORTB, BLED_Out
 		ret
