@@ -1,12 +1,23 @@
 /*
 * We run MCU at default 1Mhz (8mhz and DIV8)
+
+Head lights: 4 LEDs, powered directly from battery.
+BEACON LED: который "дублирует" сигнал для/с буззера и/или используется при поиске модели при отстреле аккума.
+
+1. FLIGHT:      Всё включенно: ходовые огни, световая сигнализация, буззер
+2. FLIGHT:      Ходовые огни выключены. Включено: световая сигнализация, буззер
+3. MAINTANANCE: Ходовые огни и буззер выключены, световая сигнализация включена.
+4. MAINTANANCE: Всё выключенно
+5. ADJUST BUZZER FREQ
+
 */
 
 //#define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
 #define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
-//#define FREQ_GEN	; procedure to beep on different freq via 1 wire uart protocol 
 #define DEBUG ; skip one minute delay after power loss
 
+; Mostly for Debugging. 
+.equ	DEFAULT_RST_MODE = 1	; 1 - 4
 
 #ifdef INVERTED_INPUT
  .MACRO SKIP_IF_INPUT_OFF
@@ -24,6 +35,7 @@
 .ENDMACRO
 #endif
  
+
 .EQU	BUZZ_Out	= PB4	; PWM buzzer output 
 .EQU	BUZZ_Inp	= PB0	; BUZZER Input from FC 
 .EQU	BLED_Out	= PB3	; BEACON LED output 
@@ -31,8 +43,11 @@
 .EQU	LEDS_Out	= PB1	; LEDS output 
 
 
-; 595 - 3.1khz
-.EQU	TMR_COMP_VAL 	= 250	; about 2 khz (50% duty cycle) at 1mhz clock source
+; Calculate TMR_COMP_VAL for desired frequency:
+; TMR_COMP_VAL = 500000 / Freq(Hz)
+; Value should be 10-255
+; For Example: To get 2100Hz, TMR_COMP_VAL would be: INT(500000 / 2100) = 238
+.EQU	TMR_COMP_VAL 	= 250	; 2 khz (50% duty cycle) at 1mhz clock source
 
 .undef XL
 .undef XH
@@ -42,25 +57,26 @@
 .undef ZH
 ; r0-r15 is not available in this tiny mcu series.
 .def	z0			= r0	; zero reg
-.def	itmp		= r21	; for using in interrupts
 .def	itmp_sreg	= r15	; storage for SREG in interrupts
-.def	tmp			= r16 	; general temp register
-.def	tmp1		= r17 	; general temp register
-.def	buz_on_cntr	= r18	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
-.def	pwm_volume	= r19	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
-.def	pwm_counter	= r20	; just a counter for fast PWM duty cycle
-.def	W1_DATA_L	= r22	; L data register for data, received by 1Wire protocol
-.def	W1_DATA_H	= r23	; H data register for data, received by 1Wire protocol
-.def	icp_d		= r24	; delay from ICP routine (len of the signal)
-.def	mute_buzz	= r25	; flag indicates that we need to mute buzzer (after reset manually pressed).
+.def	itmp		= r16	; for using in interrupts
+.def	tmp			= r17 	; general temp register
+.def	tmp1		= r18 	; general temp register
+.def	buz_on_cntr	= r19	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+.def	pwm_volume	= r20	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
+.def	pwm_counter	= r21	; just a counter for fast PWM duty cycle
+.def	mute_flags	= r22	; flags for muting buzzer, headlight LEDs and Beacon LED
+.equ	MUTE_FLAG_BUZ	= 0	; bit in register mute_flags
+.equ	MUTE_FLAG_BLED	= 1	; bit in register mute_flags
+.equ	MUTE_FLAG_LEDs	= 2	; bit in register mute_flags
+
 #ifdef PROGRESSIVE_DELAY
-.def	beeps_cntr	= r30	; Used in PROGRESSIVE_DELAY mode to count beeps
+.def	beeps_cntr	= r23	; Used in PROGRESSIVE_DELAY mode to count beeps
 #endif
-; r30 has the flag (no sound)
 
 .DSEG
 ;.ORG 0x0040	; start of SRAM data memory
 RST_OPTION: 	.BYTE 1	; store here count of reset presses after power-on to determine special modes of operation
+CHANGING_MODE:	.BYTE 1 ; flag inidicates that we are CHANGING MODES with RESET button 
 COMP_VAL_RAM:	.BYTE 1	; storage for freq value of buzzer.
 
 .CSEG
@@ -100,27 +116,44 @@ RST_PRESSED: ; we come here when reset button is pressed
 		; 2. configure LostModelBuzzer. with some 1wire simple protocol change parameters. (Actually just test them, then reflash, because of no EEPROM for config).
 		;    configurable: Buzzer freq.
 		rcall WAIT100MS
-		; if we are not powered from battery, do only buzzer mute 
-		sbis PINB, V_Inp	; if pin is low, then only buzzer mute can be enabled
-		sts RST_OPTION, z0			; clear RESET counter to stay in first option 
+		; if we are not powered from battery, mute everything, but do not write to EEPROM 
+		sbic PINB, V_Inp
+		rjmp skp_all_off
+		ldi tmp, 4			; go to mode 4 - everything is OFF
+		sts RST_OPTION, tmp
+		rcall UPDATE_MUTE_FLAGS
+skp_all_off:
+		; if we are in changing mode, then increnet MODE
+		lds tmp, CHANGING_MODE
+		sbrs tmp, 0	; skip if bit0 is 1
+		rjmp SHOW_CUR_MODE
 		; increment counter
 		lds tmp, RST_OPTION
 		inc tmp
 		; loop if pressed too much times
 		cpi tmp, 5			; 5 is non existing mode
-		brne SKP_OPT_LOOP
+		brlo SKP_OPT_LOOP
 		ldi tmp, 1			; go back to option 1
 SKP_OPT_LOOP:
 		sts RST_OPTION, tmp
-		; beep n times according to RST_OPTION
-L1_BUZ_RST:
-		push tmp
+		rcall UPDATE_MUTE_FLAGS
+
+		; show current mode
+SHOW_CUR_MODE:
+		lds	tmp, RST_OPTION
+SHOWML1:push tmp
 		ldi buz_on_cntr, 100 ; load 100 to the buzzer counter (about 30ms)
-		rcall BEEP_ON		; ignore mute flag
+		rcall BEACON_PULSE
+		rcall WAIT100MS
 		rcall WAIT100MS
 		pop tmp
 		dec tmp
-		brne L1_BUZ_RST
+		brne SHOWML1
+		; turn on MODE change flag
+		ldi tmp, 1
+		sts CHANGING_MODE, tmp
+		;CHANGING_MODE
+		; beep n times according to RST_OPTION
 		;wait 2 seconds more...
 		ldi tmp, 20
 L1_RST_WAIT:
@@ -129,19 +162,12 @@ L1_RST_WAIT:
 		pop tmp
 		dec tmp
 		brne L1_RST_WAIT
-		
-		; now decide to what mode to go
-		; do we just turn off buzzer?
-		lds tmp, RST_OPTION
-		;cpi tmp, 1
-		;breq RST_BUZZ_OFF
 
-
-RST_BUZZ_OFF:
-		ldi mute_buzz, 1
+;RST_BUZZ_OFF:
+		;sbr mute_flags, (1 << MUTE_FLAG_BUZ)
 		; indicate exit from RST mode
 		ldi buz_on_cntr, 20 ; very short beep
-		rcall BEEP_ON		; ignore mute flag
+		rcall BEACON_PULSE
 		rjmp PRG_CONT	; back to main program
 
 ; start of the program
@@ -162,7 +188,6 @@ RESET:
 		rcall MAIN_CLOCK_250KHZ	; set main clock to 250KHZ...
 		
 		; initialize variables
-		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
 		ldi tmp,TMR_COMP_VAL
 		STS COMP_VAL_RAM, tmp
@@ -170,12 +195,6 @@ RESET:
 		; configure pins
 		ldi tmp, 	(1<<BUZZ_Out) | (1<<LEDS_Out) | (1<<BLED_Out)	; set pins as output
 		out DDRB,	tmp				; all other pins will be inputs		
-		; If input is not inverted we need external pull-down resistor about 50K
-		;#ifdef INVERTED_INPUT
-		;ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
-		;out PUEB,	tmp				; 
-		;out PORTB, tmp				; all pins to LOW except pull-up
-		;#endif
 		
 		out PORTB, z0				; all pins to LOW
 		
@@ -197,23 +216,27 @@ RESET:
 		out PCMSK, tmp	; configure pin for ext interrupt
 		ldi tmp, (1 << PCIE)
 		out GIMSK, tmp	; pin change interrupt enable
-						
+
+		; determine MODE and configure board accordingly
+		; **** TODO read mode from EEPROM 
+		
 		sei ; Enable interrupts
 
-		;out MCUSR, z0	; reset all reset flags 
-
-		;*** DISABLE RST FUNCTION FOR NOW *****
 		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
 		rjmp RST_PRESSED
+		
+		; here we come only after Power ON (not after RESET)
+		ldi tmp, DEFAULT_RST_MODE
+		sts	RST_OPTION, tmp
+		rcall UPDATE_MUTE_FLAGS
 
-		; TEST ***************************
-		;rjmp W1_L0
+		rcall TURN_HEADLIGHTS_ON	; turn on if not muted				
 PRG_CONT:
+		; if we are here, then change mode operation is finished
+		sts CHANGING_MODE, z0
 		
 ;******* MAIN LOOP *******	
 MAIN_loop:
-		; here we should clear SRAM variable, that counts reset presses...
-		sts RST_OPTION, z0
 
 		sbis PINB, V_Inp	; if pin is low, then power is disconnected
 		rjmp GO_BEACON
@@ -222,7 +245,7 @@ MAIN_loop:
 		clr buz_on_cntr ; if pin on, we are ready
 		SKIP_IF_INPUT_OFF	; macro for sbis or sbic command
 		;rcall SHORT_BLINK_BEACON
-		rcall BEEP  ; beep until pin change come
+		rcall BEACON_PULSE  ; beep until pin change come
 		; go sleep, it will speed up supercap charging a bit...
 		rcall WDT_On_8s
 		rcall GO_sleep
@@ -231,7 +254,7 @@ MAIN_loop:
 
 GO_BEACON:      ; right after power loss we wait a minute, and then beep
 		ldi buz_on_cntr, 20 ; very short beep
-		rcall BEEP_ON
+		rcall BEACON_PULSE
 
 		#ifdef PROGRESSIVE_DELAY
 		clr beeps_cntr		; prepare counter for beeps in PROGRESSIVE_DELAY mode
@@ -252,11 +275,11 @@ BEAC_WT1:
 		brne BEAC_WT1
 		
 BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
-		rcall BEEP
+		rcall BEACON_PULSE
 		rcall WDT_On_250ms	; make small pause...
 		rcall GO_sleep ; stops here until wake-up event occurs
 		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
-		rcall BEEP
+		rcall BEACON_PULSE
 #ifdef PROGRESSIVE_DELAY
 		inc beeps_cntr	; inclrement counter. It should not overflow, because we will have very long delays at the end
 		ldi tmp, 1			; 8sec x 1 pause
@@ -287,8 +310,9 @@ BEAC_GO:push tmp
 BEAC_EXIT:
 		; go back to main loop - battery connected
 		; turn mute off (in case buzzer was muted)
-		clr mute_buzz	; buzzer should not be muted after going back to normal mode
-		;sts RST_OPTION, z0
+		; **** TODO ******
+		; enable BUZ or BLED accordingly to mode selected
+		sbr mute_flags, (0 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED)
 		rjmp MAIN_loop 
 ;******* END OF MAIN LOOP *******	
 
@@ -342,11 +366,13 @@ L1: 	dec  tmp1
 		
 ; Beep the buzzer.
 ;variable buz_on_cntr determines, will routine beep until PCINT cbange interrupt (0 value), or short beep - max 84ms (255 value)
-BEEP:
-		cp mute_buzz, z0
-		brne PWM_exit		; no sound if flag mute_buzz is set
-BEEP_ON:; call from here if we want to skip beep mute check... 
+BEACON_PULSE:
+		rcall TURN_BLED_ON	; turn accordingly to mute flag
+; seems we never want to skip murte flags anymore
+;BEACON_PULSE_ON:; call from here if we want to skip beep mute check... 
 		rcall MAIN_CLOCK_1MHZ
+		sbrc	mute_flags, MUTE_FLAG_BUZ
+		rjmp PWM_loop		; no sound if flag mute_buzz is set
 		; enable timer1
 		rcall TIMER_ENABLE	; reset timer counter
 		; load Compare register to get desired tone freq
@@ -377,8 +403,7 @@ PWM_loop_exit:
 		; disable the timer
 		rcall TIMER_DISABLE
 		rcall MAIN_CLOCK_250KHZ
-; ***** END OF MANUAL PWM ROUTINE ******
-PWM_exit:
+		rcall TURN_BLED_OFF
 		ret
 
 TIMER_ENABLE:
@@ -434,3 +459,42 @@ SHORT_BLINK_BEACON:
 		rcall	WAIT100MS
 		cbi		PORTB, BLED_Out
 		ret
+
+
+TURN_HEADLIGHTS_ON:
+	sbrs	mute_flags, MUTE_FLAG_LEDs
+	sbi	PORTB, LEDS_Out
+	ret
+
+TURN_HEADLIGHTS_OFF:
+	cbi	PORTB, LEDS_Out
+	ret
+
+TURN_BLED_ON:
+	sbrs	mute_flags, MUTE_FLAG_BLED
+	sbi	PORTB, BLED_Out
+	ret
+
+TURN_BLED_OFF:
+	cbi	PORTB, BLED_Out
+	ret
+
+UPDATE_MUTE_FLAGS:
+	lds tmp, RST_OPTION
+	cpi tmp, 1
+	brne nxt_mode2
+	sbr mute_flags, (0 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED) | (0 << MUTE_FLAG_LEDs)	
+	ret
+nxt_mode2:
+	cpi tmp, 2
+	brne nxt_mode3
+	sbr mute_flags, (0 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
+	ret
+nxt_mode3:
+	cpi tmp, 3
+	brne nxt_mode4
+	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
+	ret
+nxt_mode4:
+	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
+	ret
