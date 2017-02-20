@@ -61,16 +61,15 @@ BEACON LED: который "дублирует" сигнал для/с бузз�
 .def	itmp		= r16	; for using in interrupts
 .def	tmp			= r17 	; general temp register
 .def	tmp1		= r18 	; general temp register
-.def	buz_on_cntr	= r19	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
-.def	pwm_volume	= r20	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
-.def	pwm_counter	= r21	; just a counter for fast PWM duty cycle
-.def	mute_flags	= r22	; flags for muting buzzer, headlight LEDs and Beacon LED
+.def	tmp2		= r19 	; general temp register
+.def	buz_on_cntr	= r20	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+.def	mute_flags	= r21	; flags for muting buzzer, headlight LEDs and Beacon LED
 .equ	MUTE_FLAG_BUZ	= 0	; bit in register mute_flags
 .equ	MUTE_FLAG_BLED	= 1	; bit in register mute_flags
 .equ	MUTE_FLAG_LEDs	= 2	; bit in register mute_flags
 
 #ifdef PROGRESSIVE_DELAY
-.def	beeps_cntr	= r23	; Used in PROGRESSIVE_DELAY mode to count beeps
+.def	beeps_cntr	= r22	; Used in PROGRESSIVE_DELAY mode to count beeps
 #endif
 
 .DSEG
@@ -140,6 +139,7 @@ SHOWML1:push tmp
 		push mute_flags		; preserve current mute flags
 		ldi mute_flags, (1<<MUTE_FLAG_BUZ)	; Disable buzzer, only BEAKON LED is enabled 
 		rcall BEACON_PULSE
+		rcall MAIN_CLOCK_1MHZ	; restore 1Mhz mode
 		pop mute_flags		; restore mute flas
 		rcall WAIT100MS_1MHZ
 		rcall WAIT100MS_1MHZ
@@ -150,24 +150,29 @@ SHOWML1:push tmp
 		ldi tmp, 1
 		sts CHANGING_MODE, tmp
 		;CHANGING_MODE
-		; beep n times according to RST_OPTION
-		;wait 2 seconds more...
-		ldi tmp, 20
-L1_RST_WAIT:
-		push tmp
-		rcall WAIT100MS_1MHZ
-		pop tmp
-		dec tmp
-		brne L1_RST_WAIT
 
-;RST_BUZZ_OFF:
-		;sbr mute_flags, (1 << MUTE_FLAG_BUZ)
-		; indicate exit from RST mode
-		ldi buz_on_cntr, 20 ; very short beep
-		push mute_flags		; preserve current mute flags
-		ldi mute_flags, (1<<MUTE_FLAG_BUZ)	; Disable buzzer, only BEAKON LED is enabled 
-		rcall BEACON_PULSE
-		pop mute_flags		; restore mute flas
+		;wait 2 seconds more...
+		cbi	PORTB, BLED_Out	; start from OFF
+		rcall WAIT100MS_1MHZ	; just small pause to separate it from mode indication
+		ldi tmp1, 1	; counter for fade (start from the darkness)
+LSM3:	ldi	tmp2, 12 ; delay for fade (about 2 seconds - 12 * 770us * 255)
+		; ---- pwm cycle (770us) ----
+LSM4:	ldi  tmp, 255 ; software pwm
+		sub tmp, tmp1
+LSM1: 	dec  tmp
+		brne LSM1	; delay for BLED OFF
+		sbi	PORTB, BLED_Out	; Turn BLED ON
+		add tmp, tmp1
+LSM2:	dec	tmp
+		brne LSM2	; delay for BLED ON
+		cbi	PORTB, BLED_Out	; start from OFF
+		; ---- end of pwm cycle (770us) ----
+		dec tmp2
+		brne LSM4	; stay 
+		inc tmp1
+		cpi tmp1, 255
+		brne LSM3
+		
 		rcall MAIN_CLOCK_250KHZ	; switch back to econ slow mode
 		rjmp PRG_CONT	; back to main program
 
@@ -380,7 +385,7 @@ BEACON_PULSE:
 
 PWM_loop:
 		; just some delay... Later we can use some sort of sleep here
-		ldi tmp, 128
+		ldi tmp, 128	; about 385us
 small_pause:
 		dec tmp
 		brne small_pause
