@@ -106,16 +106,10 @@ WDT_INT:
 	
 RST_PRESSED: ; we come here when reset button is pressed
 		; logic will be:
-		; very first action - is just wait for 100ms for example, to eliminate noise on reset button
-		; beep shortly n times
-		; Then, increment RST_OPTION variable and wait about 2 seconds in loop.
-		; if during that time RESET was pressed again, then variable will just increase.
-		; After 2 seconds of waiting check RST_OPTION variable and decide what to do.
-		; Currently I think about this options:
 		; 1. disable buzzer. After battery is disconnected, if user press reset, then it disables beakon functionality until batery is connected back.
-		; 2. configure LostModelBuzzer. with some 1wire simple protocol change parameters. (Actually just test them, then reflash, because of no EEPROM for config).
-		;    configurable: Buzzer freq.
-		rcall WAIT100MS
+		; 2. configure LostModelBuzzer.
+		rcall MAIN_CLOCK_1MHZ	; Mode change routine run at 1mhz for simplicity
+		rcall WAIT100MS_1MHZ
 		; if we are not powered from battery, mute everything, but do not write to EEPROM 
 		sbic PINB, V_Inp
 		rjmp skp_all_off
@@ -138,14 +132,17 @@ SKP_OPT_LOOP:
 		sts RST_OPTION, tmp
 		rcall UPDATE_MUTE_FLAGS
 
-		; show current mode
+		; show current mode (only with BEACON LED)
 SHOW_CUR_MODE:
 		lds	tmp, RST_OPTION
 SHOWML1:push tmp
 		ldi buz_on_cntr, 100 ; load 100 to the buzzer counter (about 30ms)
+		push mute_flags		; preserve current mute flags
+		ldi mute_flags, (1<<MUTE_FLAG_BUZ)	; Disable buzzer, only BEAKON LED is enabled 
 		rcall BEACON_PULSE
-		rcall WAIT100MS
-		rcall WAIT100MS
+		pop mute_flags		; restore mute flas
+		rcall WAIT100MS_1MHZ
+		rcall WAIT100MS_1MHZ
 		pop tmp
 		dec tmp
 		brne SHOWML1
@@ -158,7 +155,7 @@ SHOWML1:push tmp
 		ldi tmp, 20
 L1_RST_WAIT:
 		push tmp
-		rcall WAIT100MS
+		rcall WAIT100MS_1MHZ
 		pop tmp
 		dec tmp
 		brne L1_RST_WAIT
@@ -167,7 +164,11 @@ L1_RST_WAIT:
 		;sbr mute_flags, (1 << MUTE_FLAG_BUZ)
 		; indicate exit from RST mode
 		ldi buz_on_cntr, 20 ; very short beep
+		push mute_flags		; preserve current mute flags
+		ldi mute_flags, (1<<MUTE_FLAG_BUZ)	; Disable buzzer, only BEAKON LED is enabled 
 		rcall BEACON_PULSE
+		pop mute_flags		; restore mute flas
+		rcall MAIN_CLOCK_250KHZ	; switch back to econ slow mode
 		rjmp PRG_CONT	; back to main program
 
 ; start of the program
@@ -345,17 +346,7 @@ GO_sleep:
 		; stops here until wake-up event occurs
 		ret
 
-;WAIT100MS:  ; routine that creates delay 100ms at 4mhz
-;		rcall WAIT50MS
-;WAIT50MS:	; routine that creates delay 50ms at 4mhz
-;		ldi  tmp, 255
-;		ldi  tmp1, 139
-;WT50_1: dec  tmp1
-;		brne WT50_1
-;		dec  tmp
-;		brne WT50_1
-;		ret
-WAIT100MS:  ; routine that creates delay 100ms at 250KHZ
+WAIT25MS_1MHZ:  ; routine that creates delay 25ms at 1Mhz (100ms at 250Khz)
 		ldi  tmp, 33
 		ldi  tmp1, 119
 L1: 	dec  tmp1
@@ -363,6 +354,13 @@ L1: 	dec  tmp1
 		dec  tmp
 		brne L1
 		ret
+
+WAIT100MS_1MHZ:	; routine that creates delay 100ms at 1Mhz
+	rcall WAIT25MS_1MHZ
+	rcall WAIT25MS_1MHZ
+	rcall WAIT25MS_1MHZ
+	rcall WAIT25MS_1MHZ
+	ret
 		
 ; Beep the buzzer.
 ;variable buz_on_cntr determines, will routine beep until PCINT cbange interrupt (0 value), or short beep - max 84ms (255 value)
@@ -453,13 +451,6 @@ MAIN_CLOCK_250KHZ:
 		ldi tmp, (0 << CLKPS3) | (1 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 32 (250Khz)
 		out  CLKPR, tmp
 		ret
-
-SHORT_BLINK_BEACON:
-		sbi		PORTB, BLED_Out
-		rcall	WAIT100MS
-		cbi		PORTB, BLED_Out
-		ret
-
 
 TURN_HEADLIGHTS_ON:
 	sbrs	mute_flags, MUTE_FLAG_LEDs
