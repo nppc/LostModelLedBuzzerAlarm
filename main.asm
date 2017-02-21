@@ -318,7 +318,7 @@ BEAC_EXIT:
 		; turn mute off (in case buzzer was muted)
 		; **** TODO ******
 		; enable BUZ or BLED accordingly to mode selected
-		sbr mute_flags, (0 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED)
+		cbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED)
 		rjmp MAIN_loop 
 ;******* END OF MAIN LOOP *******	
 
@@ -479,17 +479,19 @@ UPDATE_MUTE_FLAGS:
 	lds tmp, RST_OPTION
 	cpi tmp, 1
 	brne nxt_mode2
-	sbr mute_flags, (0 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED) | (0 << MUTE_FLAG_LEDs)	
+	cbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)	
 	ret
 nxt_mode2:
 	cpi tmp, 2
 	brne nxt_mode3
-	sbr mute_flags, (0 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
+	cbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED)
+	sbr mute_flags, (1 << MUTE_FLAG_LEDs)
 	ret
 nxt_mode3:
 	cpi tmp, 3
 	brne nxt_mode4
-	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (0 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
+	cbr mute_flags, (1 << MUTE_FLAG_BLED)
+	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_LEDs)
 	ret
 nxt_mode4:
 	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
