@@ -235,12 +235,12 @@ RESET:
 		ldi tmp, DEFAULT_RST_MODE
 		sts	RST_OPTION, tmp
 		rcall UPDATE_MUTE_FLAGS
-
-		rcall TURN_HEADLIGHTS_ON	; turn on if not muted				
+				
 PRG_CONT:
 		; if we are here, then change mode operation is finished
 		sts CHANGING_MODE, z0
-		
+		rcall TURN_HEADLIGHTS_ON	; turn on if not muted
+
 ;******* MAIN LOOP *******	
 MAIN_loop:
 
