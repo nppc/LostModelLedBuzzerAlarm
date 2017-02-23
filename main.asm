@@ -27,6 +27,8 @@ BEACON LED: который "дублирует" сигнал для/с бузз�
 ; Mostly for Debugging. 
 .equ	DEFAULT_RST_MODE = 1	; 1 - 4
 
+.equ	LEDS_FADE_PWMPULSE_REPEAT = 5	; How many times to repeat same PWM pulse to Headlight Leds Fade (time strecher)
+
 #ifdef INVERTED_INPUT
  .MACRO SKIP_IF_INPUT_OFF
 	sbis PINB, BUZZ_Inp
@@ -65,6 +67,8 @@ BEACON LED: который "дублирует" сигнал для/с бузз�
 .undef ZH
 ; r0-r15 is not available in this tiny mcu series.
 .def	z0			= r0	; zero reg
+.def	t0ocr_val	= r13	; counter for OCR0B value for PWM pulse (for Headlights smooth turn on)
+.def	t0ovf_cntr	= r14	; counter of Timer0 overflows (for Headlights smooth turn on time)
 .def	itmp_sreg	= r15	; storage for SREG in interrupts
 .def	itmp		= r16	; for using in interrupts
 .def	tmp			= r17 	; general temp register
@@ -92,7 +96,7 @@ COMP_VAL_RAM:	.BYTE 1	; storage for freq value of buzzer.
 		reti            ; just wake up... ; PCINT0 Handler
 		reti		; Timer/Counter1 Compare Match A
 		reti 		; Timer/Counter1 Overflow
-		reti		; Timer0 Overflow Handler try T flag first
+		rjmp T0Ovr	; Timer0 Overflow Handler try T flag first
 		reti		; EEPROM Ready
 		reti		; Analog Comparator Handler
 		reti		; ADC Conversion Handler
@@ -103,86 +107,6 @@ COMP_VAL_RAM:	.BYTE 1	; storage for freq value of buzzer.
 		reti		; USI START
 		reti		; USI Overflow
 
-WDT_INT:
-	in itmp_sreg, SREG
-	in itmp, WDTCR
-	sbr itmp, (1 << WDIE)
-	out WDTCR, itmp
-	out SREG, itmp_sreg
-	reti
-	
-RST_PRESSED: ; we come here when reset button is pressed
-		; logic will be:
-		; 1. disable buzzer. After battery is disconnected, if user press reset, then it disables beakon functionality until batery is connected back.
-		; 2. configure LostModelBuzzer.
-		rcall MAIN_CLOCK_1MHZ	; Mode change routine run at 1mhz for simplicity
-		rcall WAIT100MS_1MHZ
-		; if we are not powered from battery, mute everything, but do not write to EEPROM 
-		sbic PINB, V_Inp
-		rjmp skp_all_off
-		ldi tmp, 4			; go to mode 4 - everything is OFF
-		sts RST_OPTION, tmp
-		rcall UPDATE_MUTE_FLAGS
-skp_all_off:
-		; if we are in changing mode, then increnet MODE
-		lds tmp, CHANGING_MODE
-		sbrs tmp, 0	; skip if bit0 is 1
-		rjmp SHOW_CUR_MODE
-		; increment counter
-		lds tmp, RST_OPTION
-		inc tmp
-		; loop if pressed too much times
-		cpi tmp, 5			; 5 is non existing mode
-		brlo SKP_OPT_LOOP
-		ldi tmp, 1			; go back to option 1
-SKP_OPT_LOOP:
-		sts RST_OPTION, tmp
-		rcall UPDATE_MUTE_FLAGS
-
-		; show current mode (only with BEACON LED)
-SHOW_CUR_MODE:
-		lds	tmp, RST_OPTION
-SHOWML1:push tmp
-		ldi buz_on_cntr, 100 ; load 100 to the buzzer counter (about 30ms)
-		push mute_flags		; preserve current mute flags
-		ldi mute_flags, (1<<MUTE_FLAG_BUZ)	; Disable buzzer, only BEAKON LED is enabled 
-		rcall BEACON_PULSE
-		rcall MAIN_CLOCK_1MHZ	; restore 1Mhz mode
-		pop mute_flags		; restore mute flas
-		rcall WAIT100MS_1MHZ
-		rcall WAIT100MS_1MHZ
-		pop tmp
-		dec tmp
-		brne SHOWML1
-		; turn on MODE change flag
-		ldi tmp, 1
-		sts CHANGING_MODE, tmp
-		;CHANGING_MODE
-
-		;wait 2 seconds more...
-		cbi	PORTB, BLED_Out	; start from OFF
-		rcall WAIT100MS_1MHZ	; just small pause to separate it from mode indication
-		ldi tmp1, 1	; counter for fade (start from the darkness)
-LSM3:	ldi	tmp2, 12 ; delay for fade (about 2 seconds - 12 * 770us * 255)
-		; ---- pwm cycle (770us) ----
-LSM4:	ldi  tmp, 255 ; software pwm
-		sub tmp, tmp1
-LSM1: 	dec  tmp
-		brne LSM1	; delay for BLED OFF
-		sbi	PORTB, BLED_Out	; Turn BLED ON
-		add tmp, tmp1
-LSM2:	dec	tmp
-		brne LSM2	; delay for BLED ON
-		cbi	PORTB, BLED_Out	; start from OFF
-		; ---- end of pwm cycle (770us) ----
-		dec tmp2
-		brne LSM4	; stay 
-		inc tmp1
-		cpi tmp1, 255
-		brne LSM3
-		
-		rcall MAIN_CLOCK_250KHZ	; switch back to econ slow mode
-		rjmp PRG_CONT	; back to main program
 
 ; start of the program
 RESET: 	
@@ -219,7 +143,7 @@ RESET:
 		ldi tmp, (1<<PRTIM0) | (1<<PRUSI) | (1<<PRADC)
 		out PRR, tmp
 
-		rcall TIMER_DISABLE ; disable timer1 for now
+		rcall TIMER1_DISABLE ; disable timer1 for now
 
 		; disable analog comparator
 		ldi	tmp, (1 << ACD)	; analog comp. disable
@@ -267,6 +191,7 @@ MAIN_loop:
 		rjmp MAIN_loop
 
 GO_BEACON:      ; right after power loss we wait a minute, and then beep
+		rcall TURN_HEADLIGHTS_OFF	; We need make sure, that Timer0 is disabled
 		ldi buz_on_cntr, 20 ; very short beep
 		rcall BEACON_PULSE
 
@@ -385,7 +310,7 @@ BEACON_PULSE:
 		sbrc	mute_flags, MUTE_FLAG_BUZ
 		rjmp PWM_loop		; no sound if flag mute_buzz is set
 		; enable timer1
-		rcall TIMER_ENABLE	; reset timer counter
+		rcall TIMER1_ENABLE	; reset timer counter
 		; load Compare register to get desired tone freq
 		lds tmp, COMP_VAL_RAM
 		;ldi tmp, 250
@@ -412,12 +337,12 @@ chck_pcint:	SKIP_IF_INPUT_ON	; macro for sbis or sbic command
 ; here we finish our routine for buzzer.
 PWM_loop_exit:
 		; disable the timer
-		rcall TIMER_DISABLE
+		rcall TIMER1_DISABLE
 		rcall MAIN_CLOCK_250KHZ
 		rcall TURN_BLED_OFF
 		ret
 
-TIMER_ENABLE:
+TIMER1_ENABLE:
 		; enable the timer1
 		in tmp, PRR
 		cbr tmp, (1 << PRTIM1) ; clear bit
@@ -425,7 +350,9 @@ TIMER_ENABLE:
 		; configure timer 1 to work in normal mode, no prescaler
 		ldi tmp, (1<<CTC1) | (0<<CS11) | (1<<CS10) ; no prescaller
 		out TCCR1, tmp
-		out TIMSK, z0
+		in tmp, TIMSK	; TIMSK shared register for all timers, so we are accurate here
+		cbr tmp, (1<<OCIE1B) | (1<<OCIE1A) (1<<TOIE1)
+		out TIMSK, tmp
 		; reset timer
 		out TCNT1, z0
 		ldi tmp, (1 << COM1B0) ; toggle PB4 pin
@@ -436,12 +363,14 @@ TIMER_ENABLE:
 		out OCR1C, z0 ; set max top value just for initialization. Beep routine will set it to correct one.
 		ret
 
-TIMER_DISABLE:
+TIMER1_DISABLE:
 		; disable the timer
-		out TIMSK, z0
+		in tmp, TIMSK	; TIMSK shared register for all timers, so we are accurate here
+		cbr tmp, (1<<OCIE1B) | (1<<OCIE1A) (1<<TOIE1)
+		out TIMSK, tmp
 		out TCCR1, z0
 		out GTCCR, z0	; stop timer before turning it off
-		; stop clock to timer0 module
+		; stop clock to timer1 module
 		in tmp, PRR
 		sbr tmp, (1 << PRTIM1) ; set bit
 		out PRR, tmp
@@ -464,15 +393,6 @@ MAIN_CLOCK_250KHZ:
 		ldi tmp, (0 << CLKPS3) | (1 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 32 (250Khz)
 		out  CLKPR, tmp
 		ret
-
-TURN_HEADLIGHTS_ON:
-	sbrs	mute_flags, MUTE_FLAG_LEDs
-	sbi	PORTB, LEDS_Out
-	ret
-
-TURN_HEADLIGHTS_OFF:
-	cbi	PORTB, LEDS_Out
-	ret
 
 TURN_BLED_ON:
 	sbrs	mute_flags, MUTE_FLAG_BLED
@@ -503,4 +423,161 @@ nxt_mode3:
 	ret
 nxt_mode4:
 	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
+	ret
+
+; Use only i-registers here
+WDT_INT:
+	in itmp_sreg, SREG
+	in itmp, WDTCR
+	sbr itmp, (1 << WDIE)
+	out WDTCR, itmp
+	out SREG, itmp_sreg
+	reti
+	
+RST_PRESSED: ; we come here when reset button is pressed
+		; logic will be:
+		; 1. disable buzzer. After battery is disconnected, if user press reset, then it disables beakon functionality until batery is connected back.
+		; 2. configure LostModelBuzzer.
+		rcall MAIN_CLOCK_1MHZ	; Mode change routine run at 1mhz for simplicity
+		rcall WAIT100MS_1MHZ
+		; if we are not powered from battery, mute everything, but do not write to EEPROM 
+		sbic PINB, V_Inp
+		rjmp skp_all_off
+		ldi tmp, 4			; go to mode 4 - everything is OFF
+		sts RST_OPTION, tmp
+		rcall UPDATE_MUTE_FLAGS
+skp_all_off:
+		; if we are in changing mode, then increnet MODE
+		lds tmp, CHANGING_MODE
+		sbrs tmp, 0	; skip if bit0 is 1
+		rjmp SHOW_CUR_MODE
+		; increment counter
+		lds tmp, RST_OPTION
+		inc tmp
+		; loop if pressed too much times
+		cpi tmp, 5			; 5 is non existing mode
+		brlo SKP_OPT_LOOP
+		ldi tmp, 1			; go back to option 1
+SKP_OPT_LOOP:
+		sts RST_OPTION, tmp
+		rcall UPDATE_MUTE_FLAGS
+
+		; show current mode (only with BEACON LED)
+SHOW_CUR_MODE:
+		lds	tmp, RST_OPTION
+SHOWML1:push tmp
+		ldi buz_on_cntr, 100 ; load 100 to the buzzer counter (about 30ms)
+		push mute_flags		; preserve current mute flags
+		ldi mute_flags, (1<<MUTE_FLAG_BUZ)	; Disable buzzer, only BEAKON LED is enabled 
+		rcall BEACON_PULSE
+		rcall MAIN_CLOCK_1MHZ	; restore 1Mhz mode
+		pop mute_flags		; restore mute flas
+		rcall WAIT100MS_1MHZ
+		rcall WAIT100MS_1MHZ
+		pop tmp
+		dec tmp
+		brne SHOWML1
+		; turn on MODE change flag
+		ldi tmp, 1
+		sts CHANGING_MODE, tmp
+		;CHANGING_MODE
+
+		;wait 2 seconds more...
+		cbi	PORTB, BLED_Out	; start from OFF
+		rcall WAIT100MS_1MHZ	; just small pause to separate it from mode indication
+		ldi tmp1, 1	; counter for fade (start from the darkness)
+LSM3:	ldi	tmp2, 12 ; delay for fade (about 2 seconds - 12 * 770us * 255)
+		; ---- pwm cycle (770us) ----
+LSM4:	ldi  tmp, 255 ; software pwm
+		sub tmp, tmp1
+LSM1: 	dec  tmp
+		brne LSM1	; delay for BLED OFF
+		sbi	PORTB, BLED_Out	; Turn BLED ON
+		add tmp, tmp1
+LSM2:	dec	tmp
+		brne LSM2	; delay for BLED ON
+		cbi	PORTB, BLED_Out	; start from OFF
+		; ---- end of pwm cycle (770us) ----
+		dec tmp2
+		brne LSM4	; stay 
+		inc tmp1
+		cpi tmp1, 255
+		brne LSM3
+		
+		rcall MAIN_CLOCK_250KHZ	; switch back to econ slow mode
+		rjmp PRG_CONT	; back to main program
+
+		
+; Headlights smooth start
+; We do not want to freeze code while Headlights fade out, so we using Timer0 PWM
+TURN_HEADLIGHTS_ON:
+	sbrc	mute_flags, MUTE_FLAG_LEDs
+	ret		; exit if Headlights should be off
+	; Enable Timer0 in Fast PWM mode (3)
+	in tmp, PRR
+	cbr tmp, (1 << PRTIM0) ; clear bit
+	out PRR, tmp
+	; Set PWM mode, timer prescaller, connect pin PB1 (OC0B to timer)
+	ldi tmp, (1 << COM0B1) | (0 << COM0B0) | (1 << WGM01) | (1 << WGM00)
+	out TCCR0A, tmp
+	ldi tmp, (0 << CS02) | (0 << CS01) | (1 << CS00) | (0 << WGM02)
+	out TCCR0B, tmp
+	out TCNT0, z0
+	cli	; Interrupts should be off while we change registers that updated in interrupt
+	clr t0ocr_val			; Start from Lights Off
+	out OCR0B, t0ocr_val	; LIGHTS Initial state
+	clr	t0ovf_cntr			; Counter for same PWM pulse (defined in LEDS_FADE_PWMPULSE_REPEAT)
+	; Enable Overflow Interrupt
+	in tmp, TIMSK	; TIMSK shared register for all timers, so we are accurate here
+	cbr tmp, (1<<OCIE0A) | (1<<OCIE0B)
+	sbr	tmp, (1<<TOIE0)
+	out TIMSK, tmp
+	; now Headlights will be controlled by Tim0Ovf interrupt
+	sei
+	ret
+
+; this is Timer0 Overflow Interrupt for controlling Headlights smooth turn on
+; Use only i-registers here
+T0Ovr:
+	in itmp_sreg, SREG
+	; count pulses for same PWM value
+	inc t0ovf_cntr
+	ldi itmp, LEDS_FADE_PWMPULSE_REPEAT
+	cp t0ovf_cntr, itmp
+	brlo T0exit
+	clr	t0ovf_cntr	; reset counter for next pulse 
+	; change PWM value and check for Fade finish
+	inc t0ocr_val
+	breq T0finish			; Finish Fade procedure
+	out OCR0B, t0ocr_val
+T0exit:
+	out SREG, itmp_sreg
+	reti
+T0finish:
+	; We need to disable Timer0 and its interrupts and ensure that Headlights fully ON
+	rcall Timer0Disable	
+	sbi	PORTB, LEDS_Out	; Ensure lights are on
+	rjmp T0exit		; continue normal exit from Interrupt
+
+; we can call this routine from interrups or from normal code, so, take special care of the tmp variable
+Timer0Disable:
+	push tmp
+	; Turn off can occur in the middle of fade, so we need also to disable Timer0
+	in tmp, TIMSK	; TIMSK shared register for all timers, so we are accurate here
+	cbr tmp, (1<<OCIE0B) | (1<<OCIE0A) (1<<TOIE0)
+	out TIMSK, tmp
+	out TCCR0A, z0
+	out TCCR0B, z0
+	out TCNT0, z0
+	out OCR0B, z0
+	; stop clock to timer0 module
+	in tmp, PRR
+	sbr tmp, (1 << PRTIM0) ; set bit
+	out PRR, tmp
+	pop tmp
+	ret
+
+TURN_HEADLIGHTS_OFF:
+	rcall Timer0Disable
+	cbi	PORTB, LEDS_Out		; turn off lights
 	ret
