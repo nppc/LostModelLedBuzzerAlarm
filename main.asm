@@ -187,7 +187,7 @@ MAIN_loop:
 		; go sleep, it will speed up supercap charging a bit...
 		rcall WDT_On_8s
 		rcall GO_sleep
-		; we will wake up on pin change or wdt interrupt
+		; we will wake up on pin change, Timer0 overflow or wdt interrupt
 		rjmp MAIN_loop
 
 GO_BEACON:      ; right after power loss we wait a minute, and then beep
@@ -277,13 +277,17 @@ WDT_On:	wdr	; reset the WDT
 		
 
 GO_sleep:
+		; If power is connected, we should go to Idle mode
+		; When we a in BEACON mode, then Power-Down
 		; Configure Sleep Mode
-		ldi tmp, (1<<SE) | (1<<SM1) | (0<<SM0)	; enable power down sleep mode
+		ldi tmp, (1<<SE) | (1<<SM1) | (0<<SM0)	; enable power-down sleep mode
+		sbic PINB, V_Inp	; if pin is low, then power is disconnected
+		ldi tmp, (1<<SE) | (0<<SM1) | (0<<SM0)	; enable Idle sleep mode
 		out MCUCR, tmp
 		SLEEP
 		; stops here until wake-up event occurs
 		ret
-
+		
 WAIT25MS_1MHZ:  ; routine that creates delay 25ms at 1Mhz (100ms at 250Khz)
 		ldi  tmp, 33
 		ldi  tmp1, 119
@@ -314,7 +318,7 @@ BEACON_PULSE:
 		out OCR1C,tmp
 
 PWM_loop:
-		; just some delay... Later we can use some sort of sleep here
+		; just some delay... 
 		ldi tmp, 128	; about 385us
 small_pause:
 		dec tmp
@@ -473,7 +477,6 @@ RST_PRESSED: ; we come here when reset button is pressed
 		; if we are not powered from battery, mute everything, but do not write to EEPROM 
 		sbis PINB, V_Inp
 		rjmp STANDBY	; if reset presset while in BEACON MODE
-skp_all_off:
 		; if we are in changing mode, then increnet MODE
 		lds tmp, CHANGING_MODE
 		sbrs tmp, 0	; skip if bit0 is 1
