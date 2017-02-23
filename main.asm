@@ -11,7 +11,8 @@ BEACON LED: который "дублирует" сигнал для/с бузз�
 
 При отстреле аккума через N=60 секунд происходит автоматический переход в аварийный режим.
 Если подсоединить аккум опять (например это был на отстрел, а смена аккума), то автоматически востанавливается текущий (последний выбранный) режим.
-Если в аварийном режиме нажать на кнопку, то mcu уходит в режим stanbuy (когда всё выключенно) и на внешние раздражители (на кнопку) не реагирует. Выход из Standbuy можно сделать только подключив аккум опять. При этом автоматически выбирается дефолтный режим (LOS)
+Если в аварийном режиме нажать на кнопку, то mcu уходит в режим stanbuy (когда всё выключенно) и на внешние раздражители (на кнопку) не реагирует. 
+Выход из Standbuy можно сделать только подключив аккум опять. При этом автоматически выбирается дефолтный режим (LOS)
 
 Уход в Standbuy сопровождается fade out на сигнальном (т.е. он гаснет от яркого до 0)
 Вход в режим программирование сопровождается fade in сигнального (от 1/4 яркости до 3/4).
@@ -123,8 +124,6 @@ RESET:
 		ldi tmp, low (RAMEND) ; to top of RAM
 		out SPL,tmp
 		
-		rcall MAIN_CLOCK_250KHZ	; set main clock to 250KHZ...
-		
 		; initialize variables
 		; default Buzzer frequency
 		ldi tmp,TMR_COMP_VAL
@@ -169,6 +168,7 @@ RESET:
 		rcall UPDATE_MUTE_FLAGS
 				
 PRG_CONT:
+		rcall MAIN_CLOCK_250KHZ	; set main clock to 250KHZ...
 		; if we are here, then change mode operation is finished
 		sts CHANGING_MODE, z0
 		rcall TURN_HEADLIGHTS_ON	; turn on if not muted
@@ -304,8 +304,6 @@ WAIT100MS_1MHZ:	; routine that creates delay 100ms at 1Mhz
 ;variable buz_on_cntr determines, will routine beep until PCINT cbange interrupt (0 value), or short beep - max 84ms (255 value)
 BEACON_PULSE:
 		rcall TURN_BLED_ON	; turn accordingly to mute flag
-; seems we never want to skip murte flags anymore
-;BEACON_PULSE_ON:; call from here if we want to skip beep mute check... 
 		rcall MAIN_CLOCK_1MHZ
 		sbrc	mute_flags, MUTE_FLAG_BUZ
 		rjmp PWM_loop		; no sound if flag mute_buzz is set
@@ -313,7 +311,6 @@ BEACON_PULSE:
 		rcall TIMER1_ENABLE	; reset timer counter
 		; load Compare register to get desired tone freq
 		lds tmp, COMP_VAL_RAM
-		;ldi tmp, 250
 		out OCR1C,tmp
 
 PWM_loop:
@@ -351,7 +348,7 @@ TIMER1_ENABLE:
 		ldi tmp, (1<<CTC1) | (0<<CS11) | (1<<CS10) ; no prescaller
 		out TCCR1, tmp
 		in tmp, TIMSK	; TIMSK shared register for all timers, so we are accurate here
-		cbr tmp, (1<<OCIE1B) | (1<<OCIE1A) (1<<TOIE1)
+		cbr tmp, (1<<OCIE1B) | (1<<OCIE1A) | (1<<TOIE1)
 		out TIMSK, tmp
 		; reset timer
 		out TCNT1, z0
@@ -366,7 +363,7 @@ TIMER1_ENABLE:
 TIMER1_DISABLE:
 		; disable the timer
 		in tmp, TIMSK	; TIMSK shared register for all timers, so we are accurate here
-		cbr tmp, (1<<OCIE1B) | (1<<OCIE1A) (1<<TOIE1)
+		cbr tmp, (1<<OCIE1B) | (1<<OCIE1A) | (1<<TOIE1)
 		out TIMSK, tmp
 		out TCCR1, z0
 		out GTCCR, z0	; stop timer before turning it off
@@ -405,24 +402,22 @@ TURN_BLED_OFF:
 
 UPDATE_MUTE_FLAGS:
 	lds tmp, RST_OPTION
+	; LOS
 	cpi tmp, 1
 	brne nxt_mode2
 	cbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)	
 	ret
 nxt_mode2:
+	; FPV
 	cpi tmp, 2
 	brne nxt_mode3
-	cbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED)
-	sbr mute_flags, (1 << MUTE_FLAG_LEDs)
+	cbr mute_flags, (1 << MUTE_FLAG_BUZ)
+	sbr mute_flags, (1 << MUTE_FLAG_LEDs) | (1 << MUTE_FLAG_BLED)
 	ret
 nxt_mode3:
-	cpi tmp, 3
-	brne nxt_mode4
-	cbr mute_flags, (1 << MUTE_FLAG_BLED)
+	; MAINTENANCE
 	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_LEDs)
-	ret
-nxt_mode4:
-	sbr mute_flags, (1 << MUTE_FLAG_BUZ) | (1 << MUTE_FLAG_BLED) | (1 << MUTE_FLAG_LEDs)
+	cbr mute_flags, (1 << MUTE_FLAG_BLED)
 	ret
 
 ; Use only i-registers here
@@ -433,6 +428,41 @@ WDT_INT:
 	out WDTCR, itmp
 	out SREG, itmp_sreg
 	reti
+
+; Here we come after user press RESET while in BEACON MODE (ss we finished flying)
+STANDBY:
+		; we do not care anymore about preserving Super Cap, so stay at 1Mhz.
+		; Interrupts should continue to run
+		; Make Fade Out (from ON to OFF with BEACON LED)
+		cbi	PORTB, BLED_Out	; initial state
+		ldi tmp1, 254	; counter for fade (start from ON)
+LSB3:	ldi	tmp2, 6 ; delay for fade (about 1 second - 6 * 770us * 255)
+		; ---- pwm cycle (770us) ----
+LSB4:	ldi  tmp, 255 ; software pwm
+		sub tmp, tmp1
+LSB1: 	dec  tmp
+		brne LSB1	; delay for BLED OFF
+		sbi	PORTB, BLED_Out	; Turn BLED ON
+		add tmp, tmp1
+LSB2:	dec	tmp
+		brne LSB2	; delay for BLED ON
+		cbi	PORTB, BLED_Out	; start from OFF
+		; ---- end of pwm cycle (770us) ----
+		dec tmp2
+		brne LSB4	; stay 
+		dec tmp1
+		brne LSB3	; finish on 0
+		; Now we should monitor power for resuming work from Mode 1 (In this case we do not use EEPROM)
+LSB5:	rcall WDT_On_8s
+		rcall GO_sleep
+		sbis PINB, V_Inp
+		rjmp LSB5	; wait untul battery connected
+		; now Battery is connected, go to MODE 1 and exit.
+		ldi tmp, DEFAULT_RST_MODE
+		sts	RST_OPTION, tmp
+		rcall UPDATE_MUTE_FLAGS
+		rjmp PRG_CONT	; back to main program
+
 	
 RST_PRESSED: ; we come here when reset button is pressed
 		; logic will be:
@@ -441,11 +471,8 @@ RST_PRESSED: ; we come here when reset button is pressed
 		rcall MAIN_CLOCK_1MHZ	; Mode change routine run at 1mhz for simplicity
 		rcall WAIT100MS_1MHZ
 		; if we are not powered from battery, mute everything, but do not write to EEPROM 
-		sbic PINB, V_Inp
-		rjmp skp_all_off
-		ldi tmp, 4			; go to mode 4 - everything is OFF
-		sts RST_OPTION, tmp
-		rcall UPDATE_MUTE_FLAGS
+		sbis PINB, V_Inp
+		rjmp STANDBY	; if reset presset while in BEACON MODE
 skp_all_off:
 		; if we are in changing mode, then increnet MODE
 		lds tmp, CHANGING_MODE
@@ -455,7 +482,7 @@ skp_all_off:
 		lds tmp, RST_OPTION
 		inc tmp
 		; loop if pressed too much times
-		cpi tmp, 5			; 5 is non existing mode
+		cpi tmp, 4			; 4 is non existing mode
 		brlo SKP_OPT_LOOP
 		ldi tmp, 1			; go back to option 1
 SKP_OPT_LOOP:
@@ -503,8 +530,6 @@ LSM2:	dec	tmp
 		inc tmp1
 		cpi tmp1, 255
 		brne LSM3
-		
-		rcall MAIN_CLOCK_250KHZ	; switch back to econ slow mode
 		rjmp PRG_CONT	; back to main program
 
 		
@@ -564,7 +589,7 @@ Timer0Disable:
 	push tmp
 	; Turn off can occur in the middle of fade, so we need also to disable Timer0
 	in tmp, TIMSK	; TIMSK shared register for all timers, so we are accurate here
-	cbr tmp, (1<<OCIE0B) | (1<<OCIE0A) (1<<TOIE0)
+	cbr tmp, (1<<OCIE0B) | (1<<OCIE0A) | (1<<TOIE0)
 	out TIMSK, tmp
 	out TCCR0A, z0
 	out TCCR0B, z0
